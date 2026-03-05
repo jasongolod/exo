@@ -39,6 +39,7 @@ def apply_all_parsers(
     model_type: type[Model],
     model_id: ModelId,
     tools: list[dict[str, Any]] | None,
+    response_format: dict[str, Any] | None = None,
 ) -> Generator[GenerationResponse | ToolCallResponse | None]:
     mlx_generator = receiver
 
@@ -49,7 +50,7 @@ def apply_all_parsers(
             starts_in_thinking=detect_thinking_prompt_suffix(prompt, tokenizer),
         )
 
-    if issubclass(model_type, GptOssModel):
+    if issubclass(model_type, GptOssModel) and not response_format:
         mlx_generator = parse_gpt_oss(mlx_generator)
     elif (
         issubclass(model_type, DeepseekV32Model)
@@ -78,7 +79,8 @@ def parse_gpt_oss(
         try:
             stream.process(response.token)
         except HarmonyError:
-            logger.error("Encountered critical Harmony Error, returning early")
+            logger.error("Encountered critical Harmony Error, yielding error and returning")
+            yield response.model_copy(update={"text": "Harmony parser error: model output incompatible with Harmony encoding", "finish_reason": "error"})
             return
 
         delta = stream.last_content_delta

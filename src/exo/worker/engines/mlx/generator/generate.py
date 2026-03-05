@@ -57,6 +57,15 @@ from exo.worker.engines.mlx.utils_mlx import (
 )
 from exo.worker.runner.bootstrap import logger
 
+
+# ── XGrammar constrained decoding (optional) ──
+try:
+    import xgrammar as xgr
+    from xgrammar.kernels.apply_token_bitmask_mlx import apply_token_bitmask_mlx
+    XGRAMMAR_AVAILABLE = True
+except ImportError:
+    XGRAMMAR_AVAILABLE = False
+
 generation_stream = mx.new_stream(mx.default_device())
 
 _MIN_PREFIX_HIT_RATIO_TO_UPDATE = 0.5
@@ -188,6 +197,56 @@ def pipeline_parallel_prefill(
         f"[R{rank}] Prefill: {n_real} real + {n_leading}+{n_trailing} dummy iterations, "
         f"Processed {processed} tokens in {(time.perf_counter() - t_start) * 1000:.1f}ms"
     )
+
+# ── XGrammar compiler + grammar caches ──
+_grammar_compiler_cache: dict[int, "xgr.GrammarCompiler"] = {}  # type: ignore[name-defined]
+_compiled_grammar_cache: dict[str, "xgr.CompiledGrammar"] = {}  # type: ignore[name-defined]
+
+
+def _get_grammar_compiler(tokenizer: TokenizerWrapper, vocab_size: int) -> "xgr.GrammarCompiler":  # type: ignore[name-defined]
+    """Get or create a GrammarCompiler for a tokenizer (cached, expensive to create)."""
+    key = id(tokenizer)
+    if key not in _grammar_compiler_cache:
+        hf_tokenizer = tokenizer._tokenizer if hasattr(tokenizer, "_tokenizer") else tokenizer
+        tokenizer_info = xgr.TokenizerInfo.from_huggingface(hf_tokenizer, vocab_size=vocab_size)
+        _grammar_compiler_cache[key] = xgr.GrammarCompiler(tokenizer_info, max_threads=4)
+    return _grammar_compiler_cache[key]
+
+
+def _compile_grammar(tokenizer: TokenizerWrapper, vocab_size: int, schema_str: str | None = None) -> "xgr.CompiledGrammar":  # type: ignore[name-defined]
+    """Compile a JSON grammar, with caching by schema string."""
+    cache_key = schema_str or "__builtin_json__"
+    if cache_key not in _compiled_grammar_cache:
+        compiler = _get_grammar_compiler(tokenizer, vocab_size)
+        if schema_str is not None:
+            _compiled_grammar_cache[cache_key] = compiler.compile_json_schema(schema_str)
+        else:
+            _compiled_grammar_cache[cache_key] = compiler.compile_builtin_json_grammar()
+    return _compiled_grammar_cache[cache_key]
+
+
+def _xgrammar_processor(compiled_grammar: "xgr.CompiledGrammar", vocab_size: int) -> Callable[[mx.array, mx.array], mx.array]:  # type: ignore[name-defined]
+    """Create a logits processor that enforces grammar constraints."""
+    matcher = xgr.GrammarMatcher(compiled_grammar)
+    token_bitmask = xgr.allocate_token_bitmask(1, vocab_size)
+    started = False
+
+    def processor(tokens: mx.array, logits: mx.array) -> mx.array:
+        nonlocal started
+        if matcher.is_terminated():
+            return logits
+        if started:
+            last_token = int(tokens[-1].item())
+            matcher.accept_token(last_token)
+            if matcher.is_terminated():
+                return logits
+        else:
+            started = True
+        matcher.fill_next_token_bitmask(token_bitmask)
+        bitmask_mlx = mx.array(token_bitmask.numpy())
+        return apply_token_bitmask_mlx(bitmask_mlx, logits, vocab_size)
+
+    return processor
 
 
 def prefill(
@@ -327,6 +386,7 @@ def warmup_inference(
     )
 
     # Use a default sampler for warmup
+
     sampler = make_sampler(temp=0.0)
 
     mx_barrier(group)
@@ -475,6 +535,24 @@ def mlx_generate(
         # Only sample length eos tokens
         eos_ids = eos_ids_from_tokenizer(tokenizer)
         logits_processors = [ban_token_ids(eos_ids)]
+
+    # ── XGrammar constrained decoding ──
+    if XGRAMMAR_AVAILABLE and task.response_format:
+        import json as _json
+        rf = task.response_format
+        rf_type = rf.get("type", "")
+        vocab_size = model.args.vocab_size if hasattr(model, "args") else tokenizer.vocab_size
+        if rf_type == "json_schema":
+            schema = rf.get("json_schema", {}).get("schema")
+            if schema:
+                schema_str = _json.dumps(schema, sort_keys=True) if isinstance(schema, dict) else str(schema)
+                compiled = _compile_grammar(tokenizer, vocab_size, schema_str)
+                logits_processors.append(_xgrammar_processor(compiled, vocab_size))
+                logger.info("XGrammar: json_schema constrained decoding enabled")
+        elif rf_type == "json_object":
+            compiled = _compile_grammar(tokenizer, vocab_size)
+            logits_processors.append(_xgrammar_processor(compiled, vocab_size))
+            logger.info("XGrammar: json_object constrained decoding enabled")
 
     sampler = make_sampler(
         temp=task.temperature if task.temperature is not None else 0.7,

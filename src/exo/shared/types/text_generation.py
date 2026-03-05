@@ -67,3 +67,4 @@ class TextGenerationTaskParams(BaseModel, frozen=True):
     enable_thinking: bool | None = None
     logprobs: bool = False
     top_logprobs: int | None = None
+    response_format: dict[str, Any] | None = None

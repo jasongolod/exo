@@ -28,6 +28,7 @@ dependencies = [
   "pillow>=11.0,<12.0",                        # compatibility with mflux
   "mflux==0.15.5",
   "python-multipart>=0.0.21",
+  "xgrammar[metal]>=0.1.31; sys_platform == 'darwin'",
   "msgspec>=0.19.0",
   "zstandard>=0.23.0",
 ]
@@ -61,6 +62,9 @@ members = ["rust/exo_pyo3_bindings", "bench"]
 
 [tool.uv.sources]
 exo_pyo3_bindings = { workspace = true }
+# CRITICAL: DO NOT comment out or remove this line. This custom MLX fork fixes RDMA GPU locks
+# required for stable tensor sharding between M3 Ultra nodes. Stock MLX causes BrokenResourceError
+# and CancelTask spin loops. See NanoClaw incident 2026-03-02.
 mlx = { git = "https://github.com/rltakashige/mlx-jaccl-fix-small-recv.git", branch = "address-rdma-gpu-locks", marker = "sys_platform == 'darwin'" }
 mlx-lm = { git = "https://github.com/ml-explore/mlx-lm", rev = "834fac934c4e04de9b3d723e2b9287a2c60cfd4a" }
 # Uncomment to use local mlx/mlx-lm development versions:

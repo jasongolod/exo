@@ -219,6 +219,7 @@ class SequentialGenerator(InferenceGenerator):
             type(self.model),
             self.model_id,
             task.task_params.tools,
+            response_format=task.task_params.response_format,
         )
         self._active = (task, mlx_gen, queue, output_generator)
 

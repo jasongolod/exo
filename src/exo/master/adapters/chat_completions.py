@@ -103,6 +103,7 @@ def chat_request_to_text_generation(
         if chat_template_messages
         else None,
         logprobs=request.logprobs or False,
+        response_format=request.response_format,
         top_logprobs=request.top_logprobs,
     )
 
