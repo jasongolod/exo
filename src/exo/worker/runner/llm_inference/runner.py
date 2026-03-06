@@ -295,12 +295,13 @@ class Runner:
                         self.send_task_status(task_id, TaskStatus.Complete)
                         finished.append(task_id)
                     case _:
-                        self.send_response(
-                            result, self.active_tasks[task_id].command_id
-                        )
+                        if task_id in self.active_tasks:
+                            self.send_response(
+                                result, self.active_tasks[task_id].command_id
+                            )
 
             for task_id in finished:
-                del self.active_tasks[task_id]
+                self.active_tasks.pop(task_id, None)
 
             try:
                 task = self.task_receiver.receive_nowait()
